@@ -16,6 +16,8 @@ limit = st.sidebar.slider("Points to show", 20, 500, 100)
 
 placeholder = st.empty()
 
+JUNCTIONS = ["j1", "j2", "j3"]
+
 
 def fetch(source: str) -> pd.DataFrame:
     try:
@@ -23,11 +25,11 @@ def fetch(source: str) -> pd.DataFrame:
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        st.sidebar.error(f"Could not reach backend: {e}")
-        return pd.DataFrame(columns=["timestamp", "voltage", "current"])
+        st.sidebar.error(f"Could not reach backend ({source}): {e}")
+        return pd.DataFrame(columns=["timestamp", "voltage"])
 
     if not data:
-        return pd.DataFrame(columns=["timestamp", "voltage", "current"])
+        return pd.DataFrame(columns=["timestamp", "voltage"])
 
     df = pd.DataFrame(data)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -36,30 +38,18 @@ def fetch(source: str) -> pd.DataFrame:
 
 while True:
     with placeholder.container():
-        col1, col2 = st.columns(2)
+        cols = st.columns(3)
 
-        pv_df = fetch("pv")
-        out_df = fetch("output")
-
-        with col1:
-            st.subheader("PV-side (Sensor A)")
-            if not pv_df.empty:
-                st.line_chart(pv_df.set_index("timestamp")[["voltage", "current"]])
-                latest = pv_df.iloc[-1]
-                st.metric("Voltage", f"{latest['voltage']:.2f} V")
-                st.metric("Current", f"{latest['current']:.2f} A")
-            else:
-                st.info("No PV-side data yet.")
-
-        with col2:
-            st.subheader("Output-side (Sensor B)")
-            if not out_df.empty:
-                st.line_chart(out_df.set_index("timestamp")[["voltage", "current"]])
-                latest = out_df.iloc[-1]
-                st.metric("Voltage", f"{latest['voltage']:.2f} V")
-                st.metric("Current", f"{latest['current']:.2f} A")
-            else:
-                st.info("No output-side data yet.")
+        for col, source in zip(cols, JUNCTIONS):
+            df = fetch(source)
+            with col:
+                st.subheader(source.upper())
+                if not df.empty:
+                    st.line_chart(df.set_index("timestamp")[["voltage"]])
+                    latest = df.iloc[-1]
+                    st.metric("Voltage", f"{latest['voltage']:.3f} V")
+                else:
+                    st.info(f"No {source.upper()} data yet.")
 
     time.sleep(refresh_seconds)
     st.rerun()
