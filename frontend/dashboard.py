@@ -41,7 +41,7 @@ while True:
     with placeholder.container():
         st.subheader(f"Live probe reading — labeled as {current_junction}")
 
-        df = fetch("probe")
+        df = fetch("demo")
         if not df.empty:
             st.line_chart(df.set_index("timestamp")[["voltage"]])
             latest = df.iloc[-1]
