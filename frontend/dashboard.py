@@ -34,6 +34,7 @@ def fetch(source: str) -> pd.DataFrame:
 
     df = pd.DataFrame(data)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
+     df = df.sort_values("timestamp").reset_index(drop=True)
     return df
 
 while True:
