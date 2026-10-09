@@ -37,6 +37,7 @@ def fetch(source: str) -> pd.DataFrame:
     df = df.sort_values("timestamp").reset_index(drop=True)
     return df
 
+
 while True:
     with placeholder.container():
         st.subheader(f"Live probe reading — labeled as {current_junction}")
