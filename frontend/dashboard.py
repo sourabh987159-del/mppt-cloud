@@ -36,7 +36,6 @@ def fetch(source: str) -> pd.DataFrame:
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df
 
-
 while True:
     with placeholder.container():
         st.subheader(f"Live probe reading — labeled as {current_junction}")
