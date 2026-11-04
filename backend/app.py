@@ -7,7 +7,7 @@ from flask_sqlalchemy import SQLAlchemy
 app = Flask(__name__)
 
 
-db_url = os.environ.get("DATABASE_URL", "sqlite:///local.db")
+db_url = os.environ.get("postgresql://mppt_news_user:hTFRaTpydMeo1G1xDlBjqefC3A0zFQ67@dpg-dblfj4bm8hqs7395lm60-a/mppt_news", "sqlite:///local.db")
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
