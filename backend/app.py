@@ -6,6 +6,7 @@ from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
 
+
 db_url = os.environ.get("DATABASE_URL", "sqlite:///local.db")
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -34,6 +35,10 @@ class Reading(db.Model):
 
 with app.app_context():
     db.create_all()
+
+
+# PWM duty cycle (percent) that the ESP32 reads. Kept in memory.
+duty_state = {"duty": 50.0}
 
 
 @app.route("/")
@@ -82,6 +87,22 @@ def get_data():
     rows.reverse()  # oldest first, easier to plot directly
 
     return jsonify([r.to_dict() for r in rows])
+
+
+@app.route("/duty", methods=["GET"])
+def get_duty():
+    return jsonify(duty_state)
+
+
+@app.route("/duty", methods=["POST"])
+def set_duty():
+    data = request.get_json(silent=True) or {}
+    try:
+        d = float(data.get("duty"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "duty must be a number"}), 400
+    duty_state["duty"] = max(10.0, min(90.0, d))
+    return jsonify(duty_state)
 
 
 if __name__ == "__main__":
