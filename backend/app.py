@@ -7,7 +7,7 @@ from flask_sqlalchemy import SQLAlchemy
 app = Flask(__name__)
 
 
-db_url = os.environ.get("postgresql://mppt_news_user:hTFRaTpydMeo1G1xDlBjqefC3A0zFQ67@dpg-dblfj4bm8hqs7395lm60-a/mppt_news", "sqlite:///local.db")
+db_url = os.environ.get("DATABASE_URL", "sqlite:///local.db")
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
@@ -37,8 +37,9 @@ with app.app_context():
     db.create_all()
 
 
-# PWM duty cycle (percent) that the ESP32 reads. Kept in memory.
-duty_state = {"duty": 50.0}
+# PWM duty cycle (percent): what the dashboard commands, and what the ESP32 reports back.
+# Kept in memory.
+duty_state = {"duty": 50.0, "applied": None, "last_seen": None}
 
 
 @app.route("/")
@@ -91,6 +92,11 @@ def get_data():
 
 @app.route("/duty", methods=["GET"])
 def get_duty():
+    # The ESP32 sends ?applied=<duty> so the dashboard can show what it is really running
+    applied = request.args.get("applied", type=float)
+    if applied is not None:
+        duty_state["applied"] = applied
+        duty_state["last_seen"] = datetime.now(timezone.utc).isoformat()
     return jsonify(duty_state)
 
 
