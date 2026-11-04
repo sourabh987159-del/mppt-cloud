@@ -3,52 +3,81 @@ import requests
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="MPPT Live Dashboard", layout="wide")
+BACKEND_URL = st.secrets.get("BACKEND_URL", "https://mppt-cloud-1.onrender.com")
 
-BACKEND_URL = st.secrets.get("BACKEND_URL", "http://localhost:5000")
+st.set_page_config(page_title="MPPT Duty Control", layout="centered")
+st.title("MPPT Duty Cycle Control")
 
-st.title("MPPT System — Live Dashboard")
-st.caption(f"Backend: {BACKEND_URL}")
-
-refresh_seconds = st.sidebar.slider("Refresh every (seconds)", 2, 30, 5)
-limit = st.sidebar.slider("Points to show", 20, 500, 100)
-current_junction = st.sidebar.selectbox(
-    "Which junction is the probe on right now?",
-    ["J1 (~2.475 V expected)", "J2 (~1.65 V expected)", "J3 (~0.825 V expected)"],
-)
-
-placeholder = st.empty()
+if "history" not in st.session_state:
+    st.session_state.history = []
 
 
-def fetch(source: str) -> pd.DataFrame:
+def get_state():
     try:
-        resp = requests.get(f"{BACKEND_URL}/data", params={"source": source, "limit": limit}, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
+        r = requests.get(f"{BACKEND_URL}/duty", timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def set_duty(value):
+    r = requests.post(f"{BACKEND_URL}/duty", json={"duty": value}, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+# ---------- Control ----------
+state = get_state()
+start_val = float(state["duty"]) if state and state.get("duty") is not None else 50.0
+
+duty = st.slider("Duty cycle (%)", 10, 90, int(round(start_val)), step=1)
+
+if st.button("Apply duty", type="primary"):
+    try:
+        res = set_duty(float(duty))
+        st.success(f"Sent {res['duty']:.1f} %. ESP32 picks it up within ~1-2 s.")
     except Exception as e:
-        st.sidebar.error(f"Could not reach backend: {e}")
-        return pd.DataFrame(columns=["timestamp", "voltage"])
+        st.error(f"Could not send duty: {e}")
 
-    if not data:
-        return pd.DataFrame(columns=["timestamp", "voltage"])
-
-    df = pd.DataFrame(data)
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+st.divider()
 
 
-while True:
-    with placeholder.container():
-        st.subheader(f"Live probe reading — labeled as {current_junction}")
+# ---------- Live status (refreshes every 2 s) ----------
+@st.fragment(run_every=2)
+def live_status():
+    s = get_state()
+    if s is None:
+        st.warning("Backend not reachable (it may be waking up on Render, wait ~30 s).")
+        return
 
-        df = fetch("demo")
-        if not df.empty:
-            st.line_chart(df.set_index("timestamp")[["voltage"]])
-            latest = df.iloc[-1]
-            st.metric("Voltage", f"{latest['voltage']:.3f} V")
-        else:
-            st.info("No probe data yet.")
+    commanded = s.get("duty")
+    applied = s.get("applied")
+    last_seen = s.get("last_seen")
 
-    time.sleep(refresh_seconds)
-    st.rerun()
+    online = False
+    if last_seen:
+        try:
+            ts = pd.to_datetime(last_seen, utc=True)
+            age = (pd.Timestamp.now(tz="UTC") - ts).total_seconds()
+            online = age < 10
+        except Exception:
+            pass
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Commanded duty", f"{commanded:.1f} %" if commanded is not None else "--")
+    c2.metric("Applied on ESP32", f"{applied:.1f} %" if applied is not None else "--")
+    c3.metric("ESP32", "Online" if online else "Offline")
+
+    if applied is not None:
+        hist = st.session_state.history
+        hist.append({"time": time.strftime("%H:%M:%S"), "applied": applied})
+        st.session_state.history = hist[-100:]
+
+    if st.session_state.history:
+        df = pd.DataFrame(st.session_state.history).set_index("time")
+        st.line_chart(df, y="applied")
+        st.caption("Applied duty (%) over time, since this page was opened.")
+
+
+live_status()
