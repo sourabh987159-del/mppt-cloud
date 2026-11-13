@@ -1,132 +1,178 @@
-import os
-from datetime import datetime, timezone
+import time
+import pandas as pd
+import requests
+import streamlit as st
 
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
+st.set_page_config(page_title="MPPT Control", layout="wide")
 
-app = Flask(__name__)
-
-# Render database connection handling
-db_url = os.environ.get("DATABASE_URL", "sqlite:///local.db")
-if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
-if db_url.startswith("postgresql://"):
-    db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
-
-app.config["SQLALCHEMY_DATABASE_URI"] = db_url
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-db = SQLAlchemy(app)
-
-# Database model for MPPT Voltage/Current telemetry
-class Reading(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-    source = db.Column(db.String(20))
-    voltage = db.Column(db.Float)
-    current = db.Column(db.Float)
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "timestamp": self.timestamp.isoformat(),
-            "source": self.source,
-            "voltage": self.voltage,
-            "current": self.current,
-        }
-
-with app.app_context():
-    db.create_all()
-
-# Expanded state dictionary matching your Streamlit frontend expectations
-duty_state = {
-    "duty": 50.0,
-    "freq": 50000.0,        # Default 50 kHz
-    "applied": None,
-    "applied_freq": None,
-    "last_seen": None,
-    "fw": None,
-    "status": None,
-    "rssi": None,
-    "uptime": None
-}
-
-@app.route("/")
-def home():
-    return {"status": "ok", "message": "MPPT backend is running"}
-
-# ---------- Telemetry Endpoints (Database) ----------
-
-@app.route("/data", methods=["POST"])
-def post_data():
-    data = request.get_json(silent=True) or {}
+def secret(name, default=""):
     try:
-        r = Reading(
-            source=str(data.get("source", "esp32-mppt"))[:20],
-            voltage=float(data.get("voltage")),
-            current=float(data.get("current", 0)),
-        )
-    except (TypeError, ValueError):
-        return jsonify({"error": "voltage and current must be numbers"}), 400
-    
-    db.session.add(r)
-    db.session.commit()
-    return jsonify(r.to_dict()), 201
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
 
-@app.route("/data", methods=["GET"])
-def get_data():
-    limit = request.args.get("limit", 200, type=int)
-    q = Reading.query
-    source = request.args.get("source")
-    if source:
-        q = q.filter_by(source=source)
-    rows = q.order_by(Reading.id.desc()).limit(limit).all()
-    return jsonify([r.to_dict() for r in reversed(rows)])
+# Updated to your active Render Web Service URL
+BACKEND_URL = secret("BACKEND_URL", "https://mppt-cloud-2.onrender.com")
+API_KEY = secret("API_KEY", "")
+ss = st.session_state
 
-# ---------- Control Loop Endpoints (In-Memory State) ----------
+def get_state(timeout=3):
+    try:
+        r = requests.get(f"{BACKEND_URL}/duty", timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
 
-@app.route("/duty", methods=["GET"])
-def get_duty():
-    # ESP32 reports its actual state as URL query parameters when it polls for updates
-    applied = request.args.get("applied", type=float)
-    applied_freq = request.args.get("applied_freq", type=float)
-    fw = request.args.get("fw", type=str)
-    status = request.args.get("status", type=str)
-    rssi = request.args.get("rssi", type=int)
-    uptime = request.args.get("uptime", type=int)
+def send(payload):
+    headers = {"X-API-Key": API_KEY} if API_KEY else {}
+    r = requests.post(f"{BACKEND_URL}/duty", json=payload, headers=headers, timeout=10)
+    r.raise_for_status()
+    return r.json()
 
-    # If the ESP32 provided any data, update the state and the last_seen timestamp
-    if any(v is not None for v in [applied, applied_freq, fw, status, rssi, uptime]):
-        duty_state["last_seen"] = datetime.now(timezone.utc).isoformat()
-        if applied is not None: duty_state["applied"] = applied
-        if applied_freq is not None: duty_state["applied_freq"] = applied_freq
-        if fw is not None: duty_state["fw"] = fw
-        if status is not None: duty_state["status"] = status
-        if rssi is not None: duty_state["rssi"] = rssi
-        if uptime is not None: duty_state["uptime"] = uptime
+# ---------- session setup ----------
+ss.setdefault("history", [])
+ss.setdefault("events", [])
+ss.setdefault("prev", {})
+ss.setdefault("flash", None)
 
-    return jsonify(duty_state)
+if "duty_slider" not in ss:
+    first = get_state(timeout=10)            
+    ss.duty_slider = int(round(first["duty"])) if first and first.get("duty") is not None else 10
+    ss.freq_slider = int(round(first["freq"] / 1000)) if first and first.get("freq") is not None else 50
 
-@app.route("/duty", methods=["POST"])
-def set_duty():
-    # Streamlit dashboard uses this to set the commanded targets
-    data = request.get_json(silent=True) or {}
-    
-    if "duty" in data:
+def log(msg):
+    ss.events.insert(0, f"{time.strftime('%H:%M:%S')}  {msg}")
+    del ss.events[50:]
+
+# ---------- button callbacks ----------
+def do_apply():
+    try:
+        res = send({"duty": float(ss.duty_slider), "freq": float(ss.freq_slider) * 1000})
+        ss.flash = ("ok", f"Sent {res['duty']:.1f} % at {res['freq'] / 1000:.0f} kHz. "
+                          "The ESP32 picks it up within 1-2 s.")
+        log(f"You sent {res['duty']:.1f} % / {res['freq'] / 1000:.0f} kHz")
+    except Exception as e:
+        ss.flash = ("err", f"Could not send: {e}")
+
+def do_preset(duty):
+    ss.duty_slider = duty
+    do_apply()
+
+# ---------- layout ----------
+st.title("MPPT control")
+left, right = st.columns([1, 2], gap="large")
+
+with left:
+    st.subheader("Set output")
+    st.slider("Duty cycle (%)", 10, 90, step=1, key="duty_slider")
+    st.slider("PWM frequency (kHz)", 10, 70, step=1, key="freq_slider")
+    st.button("Apply", type="primary", on_click=do_apply, use_container_width=True)
+
+    st.caption("Quick duty presets (keep the current frequency)")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.button("10 %", on_click=do_preset, args=(10,), use_container_width=True)
+    p2.button("25 %", on_click=do_preset, args=(25,), use_container_width=True)
+    p3.button("50 %", on_click=do_preset, args=(50,), use_container_width=True)
+    p4.button("75 %", on_click=do_preset, args=(75,), use_container_width=True)
+
+    if ss.flash:
+        kind, msg = ss.flash
+        (st.success if kind == "ok" else st.error)(msg)
+
+@st.fragment(run_every=2)
+def live():
+    s = get_state()
+    if s is None:
+        st.warning("Backend not reachable. If it is waking up on Render, wait about 30 s.")
+        return
+
+    duty, freq = s.get("duty"), s.get("freq")
+    applied, applied_freq = s.get("applied"), s.get("applied_freq")
+    fw, status = s.get("fw"), s.get("status")
+
+    online, age = False, None
+    if s.get("last_seen"):
         try:
-            # Constrain duty cycle to 10% - 90% for boost converter safety
-            duty_state["duty"] = max(10.0, min(90.0, float(data["duty"])))
-        except (TypeError, ValueError):
-            return jsonify({"error": "duty must be a number"}), 400
-            
-    if "freq" in data:
-        try:
-            # Constrain frequency to 10kHz - 100kHz 
-            duty_state["freq"] = max(10000.0, min(100000.0, float(data["freq"])))
-        except (TypeError, ValueError):
-            return jsonify({"error": "freq must be a number"}), 400
-            
-    return jsonify(duty_state)
+            ts = pd.to_datetime(s["last_seen"], utc=True)
+            age = (pd.Timestamp.now(tz="UTC") - ts).total_seconds()
+            online = age < 10
+        except Exception:
+            pass
 
-if __name__ == "__main__":
-    # Bind to 0.0.0.0 to expose the server to the local network/Render
-    app.run(host="0.0.0.0", port=5000)
+    if online and status == "updating":
+        device = "Downloading update"
+    elif not online and status == "updating":
+        device = "Rebooting after update"
+    elif online and status == "update_failed":
+        device = "Online (update failed)"
+    elif online:
+        device = "Online"
+    else:
+        device = "Offline"
+
+    # ----- event log -----
+    prev = ss.prev
+    if not prev:
+        log("Dashboard connected")
+    else:
+        if online != prev["online"]:
+            log("ESP32 came online" if online else "ESP32 went offline")
+        if fw != prev["fw"]:
+            log(f"Firmware changed: {prev['fw'] or '--'} -> {fw or '--'}")
+        if status != prev["status"] and status:
+            log(f"Device status: {status}")
+        if applied != prev["applied"] and applied is not None:
+            log(f"ESP32 applied {applied:.1f} %")
+        if applied_freq != prev["applied_freq"] and applied_freq is not None:
+            log(f"ESP32 applied {applied_freq / 1000:.0f} kHz")
+    ss.prev = {"online": online, "fw": fw, "status": status,
+               "applied": applied, "applied_freq": applied_freq}
+
+    # ----- chart history -----
+    nan = float("nan")
+    ss.history.append({
+        "time": time.strftime("%H:%M:%S"),
+        "Commanded duty (%)": duty if duty is not None else nan,
+        "Applied duty (%)": applied if applied is not None else nan,
+        "Commanded freq (kHz)": freq / 1000 if freq is not None else nan,
+        "Applied freq (kHz)": applied_freq / 1000 if applied_freq is not None else nan,
+    })
+    del ss.history[:-300]
+
+    # ----- status cards -----
+    st.subheader("Live status")
+    a, b, c = st.columns(3)
+    a.metric("Commanded duty", f"{duty:.1f} %" if duty is not None else "--")
+    b.metric("Applied on ESP32", f"{applied:.1f} %" if applied is not None else "--")
+    c.metric("ESP32", device)
+
+    d, e, f = st.columns(3)
+    d.metric("Commanded freq", f"{freq / 1000:.0f} kHz" if freq is not None else "--")
+    e.metric("Applied freq", f"{applied_freq / 1000:.0f} kHz" if applied_freq is not None else "--")
+    f.metric("Firmware", fw if fw else "--")
+
+    g, h, i = st.columns(3)
+    g.metric("Last seen", f"{age:.0f} s ago" if age is not None else "never")
+    h.metric("WiFi signal", f"{s.get('rssi')} dBm" if s.get("rssi") is not None else "--")
+    i.metric("ESP32 uptime", f"{s.get('uptime')} s" if s.get("uptime") is not None else "--")
+
+    in_sync = (online and applied is not None and duty is not None and abs(applied - duty) < 0.05 and
+               (applied_freq is None or freq is None or abs(applied_freq - freq) < 1))
+    if in_sync:
+        st.success("In sync: the ESP32 is running what you commanded.")
+    elif online:
+        st.info("Waiting for the ESP32 to pick up the new setting.")
+
+    # ----- charts -----
+    df = pd.DataFrame(ss.history).set_index("time")
+    st.caption("Duty (%) since this page was opened")
+    st.line_chart(df[["Commanded duty (%)", "Applied duty (%)"]])
+    st.caption("Frequency (kHz) since this page was opened")
+    st.line_chart(df[["Commanded freq (kHz)", "Applied freq (kHz)"]])
+
+    st.caption("Event log (newest first)")
+    st.code("\n".join(ss.events[:12]) or "No events yet", language=None)
+
+with right:
+    live()
